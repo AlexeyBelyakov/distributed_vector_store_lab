@@ -16,6 +16,17 @@ class DocumentWithEmbedding:
     metadata: dict
     embedding: list[float]
 
+    @classmethod
+    def from_document(cls, document: Document, embedding: list[float]) -> 'DocumentWithEmbedding':
+        if not hasattr(document, 'id') or not document.id:
+            document.id = str(uuid.uuid4())
+        return cls(
+            id=document.id,
+            page_content=document.page_content,
+            metadata=document.metadata,
+            embedding=embedding
+        )
+
     # implement < 
     def __lt__(self, other: 'DocumentWithEmbedding') -> bool:
         return self.id < other.id
@@ -44,7 +55,7 @@ class DocumentWithEmbedding:
             documents_dict = [doc.__dict__ for doc in documents]
             json.dump(documents_dict, f, indent=4)
 
-    def dump_to_file(self, file_path: str):
+    def append_to_file(self, file_path: str):
         documents = self.load_from_file(file_path)
         documents.append(self)
         self.dump_documents_to_file(documents, file_path)
@@ -53,16 +64,22 @@ class DistributedVectorStore:
     MAX_FILE_SIZE_IN_BYTES = 1024 * 1024 * 1024
     def __init__(self, max_file_size: int = MAX_FILE_SIZE_IN_BYTES):
         self.max_file_size = max_file_size
-        self.chunk_file_template = f"vector_store/chunk_{{idx}}.pkl"
+        self.chunk_file_template = f"vector_store/chunk_{{idx}}.json"
         os.makedirs("vector_store", exist_ok=True)
         chunk_files = self._get_chunk_files()
+        self.current_chunk_index = self._get_current_chunk_index(chunk_files)
         if chunk_files:
-            self.current_chunk_index = max(int(f.split('_')[-1].split('.')[0]) for f in chunk_files)
             self.current_chunk_size = os.path.getsize(chunk_files[self.current_chunk_index])
         else:
-            self.current_chunk_index = 0
             self.current_chunk_size = 0
 
+    @staticmethod
+    def _get_current_chunk_index(chunk_files: list[str]) -> int:
+        if not chunk_files:
+            return 0
+        # extract max index among files: "vector_store/chunk_{index}.json"
+        return max(int(f.split('_')[-1].split('.')[0]) for f in chunk_files)
+    
     def add_texts(self, texts: list[str], metadata_list: Optional[list[dict]] = None) -> list[str]:
         documents: list[Document] = []
         for i, text in enumerate(texts):
@@ -112,33 +129,22 @@ class DistributedVectorStore:
         result = [doc for similarity, doc in sorted(heap, reverse=True)]
         doc_result = [doc.get_document() for doc in result]
         return doc_result
-    
-    def _prepare_document_with_emb(self, document: Document) -> DocumentWithEmbedding:
-        if not hasattr(document, 'id') or not document.id:
-            document.id = str(uuid.uuid4())
-        embedding = list(self._text_to_vec(document.page_content))
-        return DocumentWithEmbedding(
-            id=document.id,
-            page_content=document.page_content,
-            metadata=document.metadata,
-            embedding=embedding
-        )
-        
+
     def _save_to_chunk_file(self, doc_emb: DocumentWithEmbedding) -> None:
-        estimated_size = len(doc_emb.page_content.encode('utf-8')) + 1000
+        estimated_size = len(doc_emb.page_content.encode('utf-8')) + len(doc_emb.embedding) * 8
         if self.current_chunk_size + estimated_size > self.max_file_size:
             self.current_chunk_index += 1
             self.current_chunk_size = 0
         self.current_chunk_size += estimated_size
         current_chunk_file = self.chunk_file_template.format(idx=self.current_chunk_index)
-        doc_emb.dump_to_file(current_chunk_file)
+        doc_emb.append_to_file(current_chunk_file)
 
     def add_documents(self, documents: list[Document]) -> list[str]:
         for document in documents:
-            doc_emb = self._prepare_document_with_emb(document)
+            embedding = list(self._text_to_vec(document.page_content))
+            doc_emb = DocumentWithEmbedding.from_document(document, embedding)
             self._save_to_chunk_file(doc_emb)
-        ids = [doc.id for doc in documents]
-        return ids
+        return [doc.id for doc in documents]
 
     def _cosin_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         if vec1.size == 0 or vec2.size == 0:
@@ -147,7 +153,7 @@ class DistributedVectorStore:
     
     def _get_chunk_files(self) -> list[str]:
         dir_name = "vector_store"
-        return [os.path.join(dir_name, f) for f in os.listdir(dir_name) if f.startswith("chunk_") and f.endswith(".pkl")]
+        return [os.path.join(dir_name, f) for f in os.listdir(dir_name) if f.startswith("chunk_") and f.endswith(".json")]
 
     
     @staticmethod
