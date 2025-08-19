@@ -1,0 +1,7 @@
+langchain-core
+langchain
+ollama
+numpy
+pytest
+# langchain-community
+# pypdf
